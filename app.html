@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>应用下载跳转</title>
+  <script>
+    window.onload = function() {
+      var ua = navigator.userAgent.toLowerCase();
+      var iosUrl = 'https://apps.apple.com/cn/app/hybott/id6737214918';         // 替换为你的iOS链接
+      var androidUrl = 'https://play.google.com/store/apps/details?id=com.redtea.hybott'; // 替换为你的Android链接
+      var defaultUrl = 'https://play.google.com/store/apps/details?id=com.redtea.hybott'; // 其他设备跳转链接
+
+      if (/android/.test(ua)) {
+        window.location.href = androidUrl;
+      } else if (/iphone|ipad|ipod/.test(ua)) {
+        window.location.href = iosUrl;
+      } else {
+        window.location.href = defaultUrl;
+      }
+    }
+  </script>
+</head>
+<body>
+  <p>正在为您跳转到应用下载页面，请稍候...</p>
+</body>
+</html> 
