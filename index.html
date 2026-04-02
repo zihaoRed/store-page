@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>小学数学 · 课堂互动描边测周长</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top-bar">
+      <label class="btn btn-primary upload-label">
+        <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden />
+        上传图片
+      </label>
+      <button type="button" class="btn" id="btnUndo" title="Ctrl+Z">撤销</button>
+      <button type="button" class="btn" id="btnRedo" title="Ctrl+Y">重做</button>
+      <button type="button" class="btn btn-warn" id="btnClear">清空笔迹</button>
+      <button type="button" class="btn" id="btnGrid">网格背景</button>
+      <button type="button" class="btn" id="btnCalibrate">标定</button>
+      <button type="button" class="btn btn-primary" id="btnExport">导出 PNG</button>
+    </header>
+
+    <div class="main">
+      <aside class="toolbar toolbar-left">
+        <button type="button" class="tool-btn active" data-tool="brush" title="手绘描边">
+          <span class="tool-icon">✎</span>
+          <span class="tool-label">画笔</span>
+        </button>
+        <button type="button" class="tool-btn" data-tool="line" title="点击连线，双击结束">
+          <span class="tool-icon">╱</span>
+          <span class="tool-label">直线</span>
+        </button>
+        <button type="button" class="tool-btn" data-tool="select" title="选择线条">
+          <span class="tool-icon">➤</span>
+          <span class="tool-label">选择</span>
+        </button>
+        <div class="tool-divider"></div>
+        <label class="color-wrap">
+          <span class="small-label">颜色</span>
+          <input type="color" id="brushColor" value="#e53935" />
+        </label>
+        <label class="width-wrap">
+          <span class="small-label">粗细</span>
+          <input type="range" id="brushWidth" min="2" max="24" value="4" />
+          <span id="brushWidthVal">4</span>px
+        </label>
+      </aside>
+
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="c"></canvas>
+        <div class="pan-hint" id="panHint">按住空格拖动画布 · 滚轮缩放</div>
+      </div>
+
+      <aside class="panel panel-right">
+        <h3>测量</h3>
+        <div class="stat-row">
+          <span class="stat-label">选中长度</span>
+          <div class="stat-units pulse-target" id="selLenBlock" aria-live="polite">
+            <span class="stat-placeholder">—</span>
+          </div>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">全部总长</span>
+          <div class="stat-units pulse-target" id="totalLenBlock" aria-live="polite">
+            <span class="stat-placeholder">0</span>
+          </div>
+        </div>
+        <p class="calib-note" id="calibNote">
+          分「图上换算」与「屏上约」两组单位；放大缩小只改变后者。老师可在常用缩放下「标定」。
+        </p>
+        <div class="panel-actions">
+          <button
+            type="button"
+            class="btn btn-wide"
+            id="btnToLine"
+            disabled
+            title="保留原曲线：复制蓝色虚线弦（端点连线）+ 绿色等弧长水平线，可与原曲线对比"
+          >
+            弦线对比
+          </button>
+          <button type="button" class="btn btn-wide" id="btnToCurve" disabled>转为曲线</button>
+          <button type="button" class="btn btn-wide btn-warn" id="btnDeleteSel" disabled>删除选中</button>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="bottom-hint">
+      「弦线对比」保留原曲线，并复制蓝虚线「弦」与绿虚线「等弧长拉直线」；分别选中原曲线、两线可对比弧长、弦长与绳长拉直；直线模式：单击加点连线，双击或 Esc 结束。
+    </footer>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
