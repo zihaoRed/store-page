@@ -18,6 +18,8 @@
   const calibNote = document.getElementById('calibNote');
   const btnToLine = document.getElementById('btnToLine');
   const btnToCurve = document.getElementById('btnToCurve');
+  const btnUnfoldStraight = document.getElementById('btnUnfoldStraight');
+  const btnRestoreUnfold = document.getElementById('btnRestoreUnfold');
   const btnDeleteSel = document.getElementById('btnDeleteSel');
   const panHint = document.getElementById('panHint');
   const toolBtns = document.querySelectorAll('.tool-btn');
@@ -30,6 +32,7 @@
     'strokeUniform',
     'isChordCompareLine',
     'isArcUnfoldLine',
+    'isUnfoldDemoLine',
     'strokeDashArray',
   ];
 
@@ -49,6 +52,25 @@
   const history = [];
   let historyIndex = -1;
   const MAX_HISTORY = 40;
+
+  let unfoldAnimating = false;
+  /** 拉直前克隆的原始对象（不在画布上），与 unfoldRestoreMorphRef 成对使用 */
+  let unfoldRestoreClone = null;
+  let unfoldRestoreMorphRef = null;
+
+  function clearUnfoldBackup() {
+    unfoldRestoreClone = null;
+    unfoldRestoreMorphRef = null;
+  }
+
+  function hasUnfoldRestore() {
+    if (!unfoldRestoreClone || !unfoldRestoreMorphRef) return false;
+    if (canvas.getObjects().indexOf(unfoldRestoreMorphRef) < 0) {
+      clearUnfoldBackup();
+      return false;
+    }
+    return true;
+  }
 
   function resizeCanvas() {
     const w = wrap.clientWidth;
@@ -197,6 +219,18 @@
 
     if (obj.type === 'path') {
       return pathPixelLengthWithMatrix(obj, obj.calcTransformMatrix());
+    }
+
+    if (obj.type === 'polyline') {
+      const pts = obj.points || [];
+      const m = obj.calcTransformMatrix();
+      let plen = 0;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = fabric.util.transformPoint(new fabric.Point(pts[i].x, pts[i].y), m);
+        const b = fabric.util.transformPoint(new fabric.Point(pts[i + 1].x, pts[i + 1].y), m);
+        plen += Math.hypot(b.x - a.x, b.y - a.y);
+      }
+      return plen;
     }
 
     if (obj.type === 'group' && obj.getObjects) {
@@ -380,6 +414,50 @@
     return o && o.type === 'group' && o.isCurveGroup;
   }
 
+  function pathHasCloseCommand(pathObj) {
+    const segs = pathObj.path;
+    if (!segs) return false;
+    return segs.some(function (s) {
+      return s[0] === 'Z' || s[0] === 'z';
+    });
+  }
+
+  function pathEndpointsClose(pathObj, parentMat) {
+    const ep = pathEndpointsCanvas(pathObj, parentMat);
+    if (!ep || !ep.a || !ep.b) return false;
+    const sw = pathObj.strokeWidth || 4;
+    const tol = Math.max(28, sw * 8);
+    return Math.hypot(ep.b.x - ep.a.x, ep.b.y - ep.a.y) <= tol;
+  }
+
+  function isClosedFreehandPath(o) {
+    if (!isFreehandPath(o)) return false;
+    if (pathHasCloseCommand(o)) return true;
+    return pathEndpointsClose(o, null);
+  }
+
+  function polylineGroupIsClosed(grp) {
+    if (!isPolylineGroup(grp)) return false;
+    const ep = polylineGroupEndpoints(grp);
+    if (!ep || !ep.a || !ep.b) return false;
+    const tol = 32;
+    return Math.hypot(ep.b.x - ep.a.x, ep.b.y - ep.a.y) <= tol;
+  }
+
+  function canUnfoldStraightDemo(active) {
+    return isClosedFreehandPath(active) || polylineGroupIsClosed(active);
+  }
+
+  function strokeWidthOf(o) {
+    if (!o) return 4;
+    if (o.strokeWidth != null) return o.strokeWidth;
+    if (o.getObjects) {
+      const first = o.getObjects()[0];
+      if (first && first.strokeWidth != null) return first.strokeWidth;
+    }
+    return 4;
+  }
+
   function updateConvertButtons(active) {
     const canLine =
       isFreehandPath(active) ||
@@ -388,6 +466,11 @@
       (active && active.type === 'path' && active.isUserStroke);
     btnToLine.disabled = !canLine;
     btnToCurve.disabled = !isStraightLine(active);
+    btnUnfoldStraight.disabled =
+      unfoldAnimating ||
+      !canUnfoldStraightDemo(active) ||
+      hasUnfoldRestore();
+    btnRestoreUnfold.disabled = !hasUnfoldRestore() || unfoldAnimating;
     btnDeleteSel.disabled = !active || active.isBackground;
   }
 
@@ -457,6 +540,12 @@
     'object:added': function (e) {
       if (e.target && e.target.isBackground) return;
       if (tool === 'line' && e.target && e.target.type === 'line') return;
+    },
+    'object:removed': function (e) {
+      if (e.target && unfoldRestoreMorphRef === e.target) {
+        clearUnfoldBackup();
+        updateMeasures();
+      }
     },
     'selection:created': updateMeasures,
     'selection:updated': updateMeasures,
@@ -1007,6 +1096,382 @@
     canvas.requestRenderAll();
     pushHistory();
     updateMeasures();
+  });
+
+  function pathDenseSamplesCanvas(pathObj, parentMat, quadSteps, cubicSteps) {
+    const segs = pathObj.path;
+    if (!segs || !segs.length) return [];
+    const m = parentMat
+      ? fabric.util.multiplyTransformMatrices(parentMat, pathObj.calcTransformMatrix())
+      : pathObj.calcTransformMatrix();
+    const qS = quadSteps || 14;
+    const cS = cubicSteps || 18;
+    const localPts = [];
+    let cx = 0;
+    let cy = 0;
+    let sx = 0;
+    let sy = 0;
+
+    function addLocal(x, y) {
+      localPts.push({ x: x, y: y });
+    }
+
+    for (let i = 0; i < segs.length; i++) {
+      const sub = segs[i];
+      const cmd = sub[0];
+      if (cmd === 'M') {
+        cx = sub[1];
+        cy = sub[2];
+        sx = cx;
+        sy = cy;
+        addLocal(cx, cy);
+      } else if (cmd === 'L') {
+        cx = sub[1];
+        cy = sub[2];
+        addLocal(cx, cy);
+      } else if (cmd === 'Q') {
+        const c1x = sub[1];
+        const c1y = sub[2];
+        const x2 = sub[3];
+        const y2 = sub[4];
+        for (let s = 1; s <= qS; s++) {
+          const t = s / qS;
+          const ox = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * c1x + t * t * x2;
+          const oy = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * c1y + t * t * y2;
+          addLocal(ox, oy);
+        }
+        cx = x2;
+        cy = y2;
+      } else if (cmd === 'C') {
+        const x1 = sub[1];
+        const y1 = sub[2];
+        const x2 = sub[3];
+        const y2 = sub[4];
+        const x3 = sub[5];
+        const y3 = sub[6];
+        for (let s = 1; s <= cS; s++) {
+          const tt = s / cS;
+          const t1 = 1 - tt;
+          const ox =
+            t1 * t1 * t1 * cx +
+            3 * t1 * t1 * tt * x1 +
+            3 * t1 * tt * tt * x2 +
+            tt * tt * tt * x3;
+          const oy =
+            t1 * t1 * t1 * cy +
+            3 * t1 * t1 * tt * y1 +
+            3 * t1 * tt * tt * y2 +
+            tt * tt * tt * y3;
+          addLocal(ox, oy);
+        }
+        cx = x3;
+        cy = y3;
+      } else if (cmd === 'Z' || cmd === 'z') {
+        for (let s = 1; s <= 10; s++) {
+          const t = s / 10;
+          addLocal(cx + t * (sx - cx), cy + t * (sy - cy));
+        }
+        cx = sx;
+        cy = sy;
+      }
+    }
+
+    return localPts.map(function (p) {
+      return fabric.util.transformPoint(new fabric.Point(p.x, p.y), m);
+    });
+  }
+
+  function polylineGroupDenseCanvas(grp) {
+    const lines = grp.getObjects().filter(function (x) {
+      return x.type === 'line';
+    });
+    const out = [];
+    const gMat = grp.calcTransformMatrix();
+    lines.forEach(function (line) {
+      const m = fabric.util.multiplyTransformMatrices(gMat, line.calcTransformMatrix());
+      const a = fabric.util.transformPoint(new fabric.Point(line.x1, line.y1), m);
+      const b = fabric.util.transformPoint(new fabric.Point(line.x2, line.y2), m);
+      if (
+        out.length === 0 ||
+        Math.hypot(a.x - out[out.length - 1].x, a.y - out[out.length - 1].y) > 0.5
+      ) {
+        out.push({ x: a.x, y: a.y });
+      }
+      out.push({ x: b.x, y: b.y });
+    });
+    return out;
+  }
+
+  function trimClosingDuplicateVerts(verts) {
+    const out = verts.slice();
+    while (out.length > 2) {
+      const a = out[out.length - 1];
+      const b = out[0];
+      if (Math.hypot(a.x - b.x, a.y - b.y) < 2) {
+        out.pop();
+      } else {
+        break;
+      }
+    }
+    return out;
+  }
+
+  function closedLoopPerimeter(vertices) {
+    const n = vertices.length;
+    if (n < 2) return 0;
+    let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      total += Math.hypot(vertices[i + 1].x - vertices[i].x, vertices[i + 1].y - vertices[i].y);
+    }
+    total += Math.hypot(vertices[n - 1].x - vertices[0].x, vertices[n - 1].y - vertices[0].y);
+    return total;
+  }
+
+  function pointAtDistanceOnClosedLoop(vertices, dAbs) {
+    const n = vertices.length;
+    if (n < 2) return vertices[0] || { x: 0, y: 0 };
+    const edges = [];
+    let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const d = Math.hypot(vertices[i + 1].x - vertices[i].x, vertices[i + 1].y - vertices[i].y);
+      edges.push({ from: vertices[i], to: vertices[i + 1], d: d });
+      total += d;
+    }
+    const dc = Math.hypot(vertices[n - 1].x - vertices[0].x, vertices[n - 1].y - vertices[0].y);
+    edges.push({ from: vertices[n - 1], to: vertices[0], d: dc });
+    total += dc;
+    if (total < 1e-6) return { x: vertices[0].x, y: vertices[0].y };
+    let d = dAbs % total;
+    if (d < 0) d += total;
+    let acc = 0;
+    for (let e = 0; e < edges.length; e++) {
+      const ed = edges[e];
+      if (acc + ed.d >= d - 1e-9) {
+        const t = ed.d < 1e-9 ? 0 : (d - acc) / ed.d;
+        return {
+          x: ed.from.x + t * (ed.to.x - ed.from.x),
+          y: ed.from.y + t * (ed.to.y - ed.from.y),
+        };
+      }
+      acc += ed.d;
+    }
+    return { x: vertices[0].x, y: vertices[0].y };
+  }
+
+  function sampleClosedLoopByFraction(vertices, n, perimeter) {
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const frac = n <= 1 ? 0 : k / (n - 1);
+      out.push(pointAtDistanceOnClosedLoop(vertices, frac * perimeter));
+    }
+    return out;
+  }
+
+  function sampleStraightHorizontal(A, L, n) {
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const t = n <= 1 ? 0 : k / (n - 1);
+      out.push({ x: A.x + t * L, y: A.y });
+    }
+    return out;
+  }
+
+  function lerpPointArrays(ptsA, ptsB, t) {
+    const out = [];
+    for (let i = 0; i < ptsA.length; i++) {
+      out.push({
+        x: ptsA[i].x * (1 - t) + ptsB[i].x * t,
+        y: ptsA[i].y * (1 - t) + ptsB[i].y * t,
+      });
+    }
+    return out;
+  }
+
+  function canvasPointsToPolyline(pts, strokeOpts) {
+    if (!pts.length) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    pts.forEach(function (p) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+    });
+    const rel = pts.map(function (p) {
+      return { x: p.x - minX, y: p.y - minY };
+    });
+    return new fabric.Polyline(rel, Object.assign({
+      left: minX,
+      top: minY,
+      fill: '',
+      strokeUniform: true,
+      strokeLineCap: 'round',
+      strokeLineJoin: 'round',
+      objectCaching: false,
+      isUserStroke: true,
+      isUnfoldDemoLine: true,
+    }, strokeOpts));
+  }
+
+  function updatePolylineCanvasPts(poly, pts) {
+    if (!pts.length) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    pts.forEach(function (p) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+    });
+    const rel = pts.map(function (p) {
+      return { x: p.x - minX, y: p.y - minY };
+    });
+    poly.set({ points: rel, left: minX, top: minY });
+    poly.setCoords();
+  }
+
+  function buildUnfoldSamples(active, L) {
+    let dense;
+    let stroke;
+    if (isFreehandPath(active)) {
+      dense = pathDenseSamplesCanvas(active, null, 14, 18);
+      stroke = active.stroke || '#e53935';
+    } else if (isPolylineGroup(active)) {
+      dense = polylineGroupDenseCanvas(active);
+      stroke = active.getObjects()[0].stroke || '#e53935';
+    } else {
+      return null;
+    }
+    dense = trimClosingDuplicateVerts(dense);
+    if (dense.length < 3) return null;
+
+    const pActual = closedLoopPerimeter(dense);
+    if (!(pActual > 4)) return null;
+
+    const n = Math.min(160, Math.max(28, Math.floor(L / 5)));
+    const sourcePts = sampleClosedLoopByFraction(dense, n, pActual);
+    const br = active.getBoundingRect(true);
+    const sw = strokeWidthOf(active);
+    const margin = Math.max(48, sw * 10);
+    const A = {
+      x: br.left + br.width / 2 - L / 2,
+      y: br.top + br.height + margin,
+    };
+    const targetPts = sampleStraightHorizontal(A, L, n);
+    return { sourcePts: sourcePts, targetPts: targetPts, stroke: stroke, sw: sw };
+  }
+
+  btnUnfoldStraight.addEventListener('click', function () {
+    if (unfoldAnimating) return;
+    if (hasUnfoldRestore()) return;
+
+    const active = canvas.getActiveObject();
+    if (!canUnfoldStraightDemo(active)) {
+      alert(
+        '请先选中一条「围着图画的封闭线」：手绘时让首尾靠近闭合，或直线多点连线时让最后一点回到起点附近。'
+      );
+      return;
+    }
+    const L = objectPixelLength(active);
+    if (!(L > 8)) {
+      alert('这条线太短，无法演示。');
+      return;
+    }
+
+    const pack = buildUnfoldSamples(active, L);
+    if (!pack || !pack.sourcePts.length) {
+      alert('无法从当前图形采样轮廓，请换一条线重试。');
+      return;
+    }
+
+    unfoldAnimating = true;
+    btnUnfoldStraight.disabled = true;
+    btnRestoreUnfold.disabled = true;
+
+    const insertIdx = canvas.getObjects().indexOf(active);
+    const sw = Math.max(3, pack.sw || 4);
+
+    function startMorphWithBackup(cloned) {
+      clearUnfoldBackup();
+      unfoldRestoreClone = cloned;
+      cloned.set({
+        evented: true,
+        selectable: true,
+        isUserStroke: true,
+      });
+
+      const morphPoly = canvasPointsToPolyline(pack.sourcePts, {
+        stroke: pack.stroke,
+        strokeWidth: sw,
+      });
+
+      canvas.remove(active);
+      canvas.add(morphPoly);
+      if (insertIdx >= 0 && typeof canvas.moveTo === 'function') {
+        canvas.moveTo(morphPoly, insertIdx);
+      }
+      unfoldRestoreMorphRef = morphPoly;
+      canvas.setActiveObject(morphPoly);
+      canvas.requestRenderAll();
+
+      const dur = 1600;
+      const start = performance.now();
+
+      function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+      }
+
+      function tick(now) {
+        const u = Math.min(1, (now - start) / dur);
+        const p = easeOutCubic(u);
+        const cur = lerpPointArrays(pack.sourcePts, pack.targetPts, p);
+        updatePolylineCanvasPts(morphPoly, cur);
+        canvas.requestRenderAll();
+        if (u < 1) {
+          requestAnimationFrame(tick);
+        } else {
+          updatePolylineCanvasPts(morphPoly, pack.targetPts);
+          unfoldAnimating = false;
+          pushHistory();
+          updateMeasures();
+          canvas.requestRenderAll();
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    if (typeof active.clone === 'function') {
+      active.clone(function (cloned) {
+        if (!cloned) {
+          unfoldAnimating = false;
+          updateMeasures();
+          alert('无法复制图形，请重试。');
+          return;
+        }
+        startMorphWithBackup(cloned);
+      }, EXTRA_PROPS);
+    } else {
+      unfoldAnimating = false;
+      updateMeasures();
+      alert('当前环境不支持图形克隆，无法提供还原。');
+    }
+  });
+
+  btnRestoreUnfold.addEventListener('click', function () {
+    if (!hasUnfoldRestore() || unfoldAnimating) return;
+    const morph = unfoldRestoreMorphRef;
+    const restored = unfoldRestoreClone;
+    const idx = canvas.getObjects().indexOf(morph);
+    canvas.remove(morph);
+    canvas.add(restored);
+    if (idx >= 0 && typeof canvas.moveTo === 'function') {
+      canvas.moveTo(restored, idx);
+    }
+    restored.setCoords();
+    if (restored.type === 'group' && restored.isCurveGroup) {
+      rebindCurveGroup(restored);
+    }
+    canvas.setActiveObject(restored);
+    clearUnfoldBackup();
+    pushHistory();
+    updateMeasures();
+    canvas.requestRenderAll();
   });
 
   btnDeleteSel.addEventListener('click', function () {
